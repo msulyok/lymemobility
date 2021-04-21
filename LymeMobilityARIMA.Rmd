@@ -1,0 +1,182 @@
+---
+title: "Lyme Mobility ARIMA"
+author: "Sulyok & Walker"
+date: "4/7/2021"
+output: word_document
+---
+
+```{r setup, echo = TRUE}
+
+library(readr)
+#lyme_file <- read_delim("lyme_file.csv", ";", escape_double = FALSE, col_types = cols(date = #col_date(format = "%d/%m/%y")), 
+#trim_ws = TRUE)
+
+lyme_file <- read.csv2("/cloud/project/lyme_file.csv")
+lyme_file<-na.omit(lyme_file)
+
+lyme_file$date<-as.Date(lyme_file$date, format = "%d.%m.%y")
+summary(lyme_file)
+
+lapply(lyme_file[c(2:11, 13)], shapiro.test)
+spearmanf<-function(x) {
+  cor.test(lyme_file$lymecases, x)$p.value
+}
+p<-as.data.frame(lapply(lyme_file[2:11], spearmanf))
+p<-as.vector(p)
+padj<-p.adjust(p,"holm",10)
+padj
+
+spearmanf<-function(x) {
+  cor.test(lyme_file$lymecases, x)$estimate
+}
+est<-as.data.frame(lapply(lyme_file[2:11], spearmanf))
+est
+
+contemp<-rbind(est, padj)
+contemp
+
+
+library(Hmisc)
+ccfspear<-function(y){ ccfspearmanx <- sapply( -3:3, function(l) cor.test(y, Hmisc::Lag(lyme_file$lymecases,l),method = "spearman", use = "complete.obs", exact=FALSE)$estimate)
+}
+
+est<-as.data.frame(lapply(lyme_file[2:11], ccfspear))
+
+ccfspear<-function(y){ ccfspearmanx <- sapply( -3:3, function(l) cor.test(y, Hmisc::Lag(lyme_file$lymecases,l),method = "spearman", use = "complete.obs", exact=FALSE)$p.value)
+}
+
+p<-as.data.frame(lapply(lyme_file[2:11], ccfspear))
+p<-as.matrix(p)
+padjust<-matrix(p.adjust(p, "holm", 70), nrow=7, ncol=10)
+padjust
+est
+
+
+###################modelling#########################################
+library(ggfortify)
+autoplot(ts(lyme_file[c(2:11, 13)], start=c(2020,7), frequency=52.18), ncol=3, geom="ribbon")
+library(tsibble)
+library(fable)
+library(feasts)
+
+
+gon<-as_tsibble(lyme_file)
+gg_tsdisplay(gon, y=lymecases) # does not look stationary
+library(forecast)
+ndiffs(gon$lymecases, test="kpss")
+lymediff<-diff(gon$lymecases)
+ndiffs(lymediff, test="kpss") #ok now
+
+ndiffs(gon$parks, test="kpss") 
+parkdiff<-diff(gon$parks)
+ndiffs(parkdiff, test="kpss") 
+ 
+ 
+fit <- gon[-c(1:4),] %>%  ###later the cb will drop the 4 four obs, so to make the models compareble we delete the first 4 obs
+  model(
+    arima = ARIMA(lymecases~ 1+ pdq(p = 0:5, d = 1:2, q = 0:5), trace=TRUE)
+  )
+fit
+glance(fit)
+report(fit)
+coefficients(fit)
+accuracy(fit)
+gg_tsresiduals(fit) #looks fine
+
+
+
+fitselected <-gon[-c(1:4),]  %>%
+  model(
+    arima = ARIMA(lymecases~ 1+ pdq(p = 1, d = 1, q = 1) + walkingweekmean + stringency + parks, trace=TRUE)
+  )
+fitselected 
+glance(fitselected )
+report(fitselected )
+coefficients(fitselected )
+accuracy(fitselected )
+gg_tsresiduals(fitselected )
+
+fitselected <- gon[-c(1:4),]  %>%
+  model(
+    arima = ARIMA(lymecases~ 1+ pdq(p = 1, d = 1, q = 1) + parks, trace=TRUE  ))
+fitselected 
+report(fitselected )
+coefficients(fitselected ) #not significant
+accuracy(fitselected )
+gg_tsresiduals(fitselected )
+augment(fitselected) %>%
+  features(.innov, ljung_box)
+
+####################GAM with distibuted lag#####################
+
+lyme_file$NumDate <- as.numeric(lyme_file$date)-min(as.numeric(lyme_file$date))
+library(dlnm)
+
+
+
+lyme_file$cb1 <- crossbasis(lyme_file$drivingweekmean , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb2 <- crossbasis(lyme_file$transitweekmean , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb3 <- crossbasis(lyme_file$walkingweekmean , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb4 <- crossbasis(lyme_file$stringency , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb5 <- crossbasis(lyme_file$retail , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb6 <- crossbasis(lyme_file$grocery , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb7 <- crossbasis(lyme_file$parks , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb8 <- crossbasis(lyme_file$transit , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb9 <- crossbasis(lyme_file$workplace , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+lyme_file$cb10 <- crossbasis(lyme_file$residential , lag=4, argvar=list(fun="bs"),arglag=list(df=3))
+
+
+lyme_file1<-lyme_file[-c(1:4),] ### to make the datasets using the same length (cb produces 4 NA beacues of the lags)
+
+library(mgcv)
+fitplain<-gam(lymecases ~s(NumDate), data=lyme_file1, family="tw")
+summary(fitplain)
+fitplain$gcv.ubre
+AIC(fitplain)
+gam.check(fitplain)
+
+
+
+fitpark<-gam(lymecases~s(NumDate) + s(parks), data = lyme_file1, select=TRUE, family=Tweedie(p=1.174))
+summary(fitpark) 
+AIC(fitpark)
+gam.check(fitpark)
+plot(fitpark)
+
+
+fitcbpark<-gam(lymecases~s(NumDate) + cb7, data = lyme_file1, select=TRUE, family=Tweedie(p=1.174))
+summary(fitcbpark) 
+AIC(fitcbpark)
+gam.check(fitcbpark)
+plot(fitcbpark)
+
+
+fitcb<-gam(lymecases~s(NumDate) + cb3 + cb7 + cb4, data = lyme_file1, select=TRUE, family=Tweedie(p=1.174))
+summary(fitcb) 
+AIC(fitcb)
+gam.check(fitcb)
+plot(fitcb)
+
+
+
+
+
+fitsmall<-gam(lymecases~s(NumDate) + s(walkingweekmean) + s(parks) + s(stringency), data = lyme_file1, select=TRUE, family=Tweedie(p=1.174))
+summary(fitsmall) 
+gam.check(fitsmall)
+AIC(fitsmall)
+plot(fitsmall, shade=TRUE, shift = coef(fitsmall)[1])
+
+
+
+
+AIC(fitplain)
+AIC(fitpark)
+AIC(fitcbpark)
+AIC(fitsmall)
+AIC(fitcb)
+
+
+sessionInfo()
+
+```
